@@ -7,6 +7,7 @@ namespace SessionSendReceiveUsingSessionClient
     using Microsoft.Azure.ServiceBus.Core;
     using System;
     using System.Collections.Generic;
+    using System.Linq;
     using System.Text;
     using System.Threading.Tasks;
 
@@ -14,8 +15,8 @@ namespace SessionSendReceiveUsingSessionClient
     {
         // Connection String for the namespace can be obtained from the Azure portal under the 
         // 'Shared Access policies' section.
-        const string ServiceBusConnectionString = "{ServiceBus connection string}";
-        const string QueueName = "{Queue Name of a Queue that supports sessions}";
+        static string ServiceBusConnectionString = Environment.GetEnvironmentVariable("SERVICE_BUS_CONNECTION_STRING");
+        const string QueueName = "sessionqueue";
         static IMessageSender messageSender;
         static ISessionClient sessionClient;
         const string SessionPrefix = "session-prefix";
@@ -27,23 +28,24 @@ namespace SessionSendReceiveUsingSessionClient
 
         static async Task MainAsync()
         {
-            const int numberOfSessions = 5;
-            const int numberOfMessagesPerSession = 3;
+            const int numberOfSessions = 1;
+            const int numberOfMessagesPerSession = 200;
 
             messageSender = new MessageSender(ServiceBusConnectionString, QueueName);
             sessionClient = new SessionClient(ServiceBusConnectionString, QueueName);
 
-            // Send messages with sessionId set
-            await SendSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession);
+            await Task.WhenAll(
+                // Send messages with sessionId set
+                SendSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession),
+                // Receive all Session based messages using SessionClient
+                ReceiveSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession)
+            );
 
-            // Receive all Session based messages using SessionClient
-            await ReceiveSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession);
+            //Console.WriteLine("=========================================================");
+            //Console.WriteLine("Completed Receiving all messages... Press any key to exit");
+            //Console.WriteLine("=========================================================");
 
-            Console.WriteLine("=========================================================");
-            Console.WriteLine("Completed Receiving all messages... Press any key to exit");
-            Console.WriteLine("=========================================================");
-
-            Console.ReadKey();
+            //Console.ReadKey();
 
             await messageSender.CloseAsync();
             await sessionClient.CloseAsync();
@@ -51,13 +53,14 @@ namespace SessionSendReceiveUsingSessionClient
 
         static async Task ReceiveSessionMessagesAsync(int numberOfSessions, int messagesPerSession)
         {
-            Console.WriteLine("===================================================================");
-            Console.WriteLine("Accepting sessions in the reverse order of sends for demo purposes");
-            Console.WriteLine("===================================================================");
+            //Console.WriteLine("===================================================================");
+            //Console.WriteLine("Accepting sessions in the reverse order of sends for demo purposes");
+            //Console.WriteLine("===================================================================");
 
             for (int i = 0; i < numberOfSessions; i++)
             {
                 int messagesReceivedPerSession = 0;
+                long lastSequenceNumber = 0;
 
                 // AcceptMessageSessionAsync(i.ToString()) as below with session id as parameter will try to get a session with that sessionId.
                 // AcceptMessageSessionAsync() without any messages will try to get any available session with messages associated with that session.
@@ -66,22 +69,35 @@ namespace SessionSendReceiveUsingSessionClient
                 if(session != null)
                 {
                     // Messages within a session will always arrive in order.
-                    Console.WriteLine("=====================================");
-                    Console.WriteLine($"Received Session: {session.SessionId}");                    
+                    //Console.WriteLine("=====================================");
+                    //Console.WriteLine($"Received Session: {session.SessionId}");
 
-                    while (messagesReceivedPerSession++ < messagesPerSession)
+                    while (messagesReceivedPerSession < messagesPerSession)
                     {
-                        Message message = await session.ReceiveAsync();
+                        var messages = await session.ReceiveAsync(100);
 
-                        Console.WriteLine($"Received message: SequenceNumber:{message.SystemProperties.SequenceNumber} Body:{Encoding.UTF8.GetString(message.Body)}");
+                        foreach (var message in messages)
+                        {
+                            if (lastSequenceNumber != 0 && message.SystemProperties.SequenceNumber != lastSequenceNumber + 1)
+                            {
+                                Console.ForegroundColor = ConsoleColor.Yellow;
+                                Console.WriteLine($"Got sequence number {message.SystemProperties.SequenceNumber}, expected {lastSequenceNumber + 1}");
+                                Console.ResetColor();
+                            }
+                            lastSequenceNumber = message.SystemProperties.SequenceNumber;
+
+                            //Console.WriteLine($"Received message: SequenceNumber:{message.SystemProperties.SequenceNumber} Body:{Encoding.UTF8.GetString(message.Body)}");
+
+                            messagesReceivedPerSession++;
+                        }
 
                         // Complete the message so that it is not received again.
                         // This can be done only if the queueClient is created in ReceiveMode.PeekLock mode (which is default).
-                        await session.CompleteAsync(message.SystemProperties.LockToken);
+                        await session.CompleteAsync(messages.Select(p => p.SystemProperties.LockToken).ToList());
                     }
 
-                    Console.WriteLine($"Received all messages for Session: {session.SessionId}");
-                    Console.WriteLine("=====================================");
+                    //Console.WriteLine($"Received all messages for Session: {session.SessionId}");
+                    //Console.WriteLine("=====================================");
 
                     // Close the Session after receiving all messages from the session
                     await session.CloseAsync();
@@ -98,7 +114,6 @@ namespace SessionSendReceiveUsingSessionClient
 
             for (int i = numberOfSessions - 1; i >= 0; i--)
             {
-                var messagesToSend = new List<Message>();
                 string sessionId = SessionPrefix + i;
                 for (int j = 0; j < messagesPerSession; j++)
                 {
@@ -107,19 +122,17 @@ namespace SessionSendReceiveUsingSessionClient
                     var message = new Message(Encoding.UTF8.GetBytes(messageBody));
                     // Assign a SessionId for the message
                     message.SessionId = sessionId;
-                    messagesToSend.Add(message);
 
                     // Write the sessionId, body of the message to the console
-                    Console.WriteLine($"Sending SessionId: {message.SessionId}, message: {messageBody}");
-                }
+                    //Console.WriteLine($"Sending SessionId: {message.SessionId}, message: {messageBody}");
 
-                // Send a batch of messages corresponding to this sessionId to the queue
-                await messageSender.SendAsync(messagesToSend);
+                    await messageSender.SendAsync(message);
+                }
             }
 
-            Console.WriteLine("=====================================");
-            Console.WriteLine($"Sent {messagesPerSession} messages each for {numberOfSessions} sessions.");
-            Console.WriteLine("=====================================");
+            //Console.WriteLine("=====================================");
+            //Console.WriteLine($"Sent {messagesPerSession} messages each for {numberOfSessions} sessions.");
+            //Console.WriteLine("=====================================");
         }
     }
 }
