@@ -1,12 +1,15 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+// #define LOG
+
 namespace SessionSendReceiveUsingSessionClient
 {
     using Microsoft.Azure.ServiceBus;
     using Microsoft.Azure.ServiceBus.Core;
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Linq;
     using System.Text;
     using System.Threading.Tasks;
@@ -23,39 +26,97 @@ namespace SessionSendReceiveUsingSessionClient
 
         static void Main(string[] args)
         {
-            MainAsync().GetAwaiter().GetResult();
+            if (args.Any(p => p == "fork"))
+                RunFork();
+
+            MainAsync(args.FirstOrDefault()).GetAwaiter().GetResult();
         }
 
-        static async Task MainAsync()
+        private static void RunFork()
+        {
+            var send = Run("send");
+            var receive = Run("receive");
+
+            send.WaitForExit();
+            receive.WaitForExit();
+
+            Process Run(string direction)
+            {
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = Process.GetCurrentProcess().MainModule.FileName,
+                        Arguments = $"exec \"{typeof(Program).Assembly.Location}\" {direction}",
+                        UseShellExecute = false,
+                        WorkingDirectory = Environment.CurrentDirectory,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    }
+                };
+
+                process.OutputDataReceived += (s, e) => Console.WriteLine($"[{direction}] {e.Data}");
+                process.ErrorDataReceived += (s, e) => Console.Error.WriteLine($"[{direction}] {e.Data}");
+
+                process.Start();
+
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                return process;
+            }
+        }
+
+        static async Task MainAsync(string direction)
         {
             const int numberOfSessions = 1;
             const int numberOfMessagesPerSession = 200;
 
-            messageSender = new MessageSender(ServiceBusConnectionString, QueueName);
-            sessionClient = new SessionClient(ServiceBusConnectionString, QueueName);
+            if (direction == null || direction == "send")
+                messageSender = new MessageSender(ServiceBusConnectionString, QueueName);
+            if (direction == null || direction == "receive")
+                sessionClient = new SessionClient(ServiceBusConnectionString, QueueName);
 
-            await Task.WhenAll(
-                // Send messages with sessionId set
-                SendSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession),
-                // Receive all Session based messages using SessionClient
-                ReceiveSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession)
-            );
+            if (direction == null)
+            {
+                await Task.WhenAll(
+                    // Send messages with sessionId set
+                    SendSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession),
+                    // Receive all Session based messages using SessionClient
+                    ReceiveSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession)
+                );
+            }
+            else if (direction == "send")
+            {
+                await SendSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession);
+            }
+            else if (direction == "receive")
+            {
+                await ReceiveSessionMessagesAsync(numberOfSessions, numberOfMessagesPerSession);
+            }
 
-            //Console.WriteLine("=========================================================");
-            //Console.WriteLine("Completed Receiving all messages... Press any key to exit");
-            //Console.WriteLine("=========================================================");
+
+#if LOG
+            Console.WriteLine("=========================================================");
+            Console.WriteLine("Completed Receiving all messages... Press any key to exit");
+            Console.WriteLine("=========================================================");
+#endif
 
             //Console.ReadKey();
 
-            await messageSender.CloseAsync();
-            await sessionClient.CloseAsync();
+            if (messageSender != null)
+                await messageSender.CloseAsync();
+            if (sessionClient != null)
+                await sessionClient.CloseAsync();
         }
 
         static async Task ReceiveSessionMessagesAsync(int numberOfSessions, int messagesPerSession)
         {
-            //Console.WriteLine("===================================================================");
-            //Console.WriteLine("Accepting sessions in the reverse order of sends for demo purposes");
-            //Console.WriteLine("===================================================================");
+#if LOG
+            Console.WriteLine("===================================================================");
+            Console.WriteLine("Accepting sessions in the reverse order of sends for demo purposes");
+            Console.WriteLine("===================================================================");
+#endif
 
             for (int i = 0; i < numberOfSessions; i++)
             {
@@ -69,12 +130,16 @@ namespace SessionSendReceiveUsingSessionClient
                 if(session != null)
                 {
                     // Messages within a session will always arrive in order.
-                    //Console.WriteLine("=====================================");
-                    //Console.WriteLine($"Received Session: {session.SessionId}");
+#if LOG
+                    Console.WriteLine("=====================================");
+                    Console.WriteLine($"Received Session: {session.SessionId}");
+#endif
 
                     while (messagesReceivedPerSession < messagesPerSession)
                     {
-                        var messages = await session.ReceiveAsync(100);
+                        var messages = (await session.ReceiveAsync(100))
+                            .OrderBy(p => p.SystemProperties.SequenceNumber)
+                            .ToList();
 
                         foreach (var message in messages)
                         {
@@ -86,7 +151,9 @@ namespace SessionSendReceiveUsingSessionClient
                             }
                             lastSequenceNumber = message.SystemProperties.SequenceNumber;
 
-                            //Console.WriteLine($"Received message: SequenceNumber:{message.SystemProperties.SequenceNumber} Body:{Encoding.UTF8.GetString(message.Body)}");
+#if LOG
+                            Console.WriteLine($"Received message: SequenceNumber:{message.SystemProperties.SequenceNumber} Body:{Encoding.UTF8.GetString(message.Body)}");
+#endif
 
                             messagesReceivedPerSession++;
                         }
@@ -96,8 +163,10 @@ namespace SessionSendReceiveUsingSessionClient
                         await session.CompleteAsync(messages.Select(p => p.SystemProperties.LockToken).ToList());
                     }
 
-                    //Console.WriteLine($"Received all messages for Session: {session.SessionId}");
-                    //Console.WriteLine("=====================================");
+#if LOG
+                    Console.WriteLine($"Received all messages for Session: {session.SessionId}");
+                    Console.WriteLine("=====================================");
+#endif
 
                     // Close the Session after receiving all messages from the session
                     await session.CloseAsync();
@@ -124,15 +193,19 @@ namespace SessionSendReceiveUsingSessionClient
                     message.SessionId = sessionId;
 
                     // Write the sessionId, body of the message to the console
-                    //Console.WriteLine($"Sending SessionId: {message.SessionId}, message: {messageBody}");
+#if LOG
+                    Console.WriteLine($"Sending SessionId: {message.SessionId}, message: {messageBody}");
+#endif
 
                     await messageSender.SendAsync(message);
                 }
             }
 
-            //Console.WriteLine("=====================================");
-            //Console.WriteLine($"Sent {messagesPerSession} messages each for {numberOfSessions} sessions.");
-            //Console.WriteLine("=====================================");
+#if LOG
+            Console.WriteLine("=====================================");
+            Console.WriteLine($"Sent {messagesPerSession} messages each for {numberOfSessions} sessions.");
+            Console.WriteLine("=====================================");
+#endif
         }
     }
 }
